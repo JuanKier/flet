@@ -3,9 +3,6 @@ import database  # Importar las funciones del archivo de base de datos
 from datetime import datetime
 import locale
 
-# Establecer la localización a español
-locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8') 
-
 # Crear las tablas al iniciar la aplicación
 database.create_tables()
 
