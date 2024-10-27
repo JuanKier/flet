@@ -1,0 +1,230 @@
+import flet as ft
+import database1  # Importar las funciones del archivo de base de datos
+from datetime import datetime, timedelta
+from threading import Timer
+
+# Crear las tablas al iniciar la aplicación
+database1.create_tables()
+
+editing_appointment_id = None  # Variable global
+
+def load_appointments_view(main_content, page, load_main_view):
+    global editing_appointment_id
+    editing_appointment_id = None  # Reiniciar ID de edición
+
+    # Función para cargar los nombres de clientes para autocompletar
+    def get_customer_names():
+        return [row[1] for row in database1.get_all_customers()]  # Obtener nombres de clientes
+
+    # Función para cargar los servicios desde la base de datos
+    def get_services_options():
+        return [ft.dropdown.Option(service[1]) for service in database1.get_all_services()]
+
+    # Campos de entrada para citas
+    name_input = ft.TextField(
+        label="Nombre del Cliente",
+        width=300,
+        on_change=lambda e: update_customer_info(e.control.value)  # Llama a la función al cambiar el texto
+    )
+
+    # Autocompletar basado en el TextField
+    def update_customer_info(name):
+        customer = database1.find_customer(name, None)  # Busca el cliente por nombre
+        if customer:
+            phone_input.value = customer[2]  # Establecer el teléfono del cliente encontrado
+            phone_input.read_only = True  # Hacer el campo de teléfono de solo lectura
+        else:
+            phone_input.value = ""  # Limpiar el teléfono si no se encuentra
+            phone_input.read_only = False  # Hacer el campo editable si no se encuentra
+        page.update()
+
+    phone_input = ft.TextField(label="Teléfono", width=300, read_only=True)  # Hacerlo solo lectura
+    date_input = ft.TextField(label="Fecha (DD/MM/AAAA)", width=300, value=datetime.now().strftime('%d/%m/%Y'))
+    time_input = ft.TextField(label="Hora (HH:MM)", width=300)
+    service_input = ft.Dropdown(
+        label="Servicio",
+        options=get_services_options(),  # Cargar servicios desde la base de datos
+        width=300
+    )
+
+    # Nuevo dropdown para seleccionar el estado
+    status_input = ft.Dropdown(
+        label="Estado",
+        options=[
+            ft.dropdown.Option("Pendiente"),
+            ft.dropdown.Option("Finalizado")
+        ],
+        width=300
+    )
+
+    # Tabla de citas
+    appointment_table = ft.DataTable(
+        columns=[
+            ft.DataColumn(ft.Text("Nombre")),
+            ft.DataColumn(ft.Text("Teléfono")),
+            ft.DataColumn(ft.Text("Fecha")),
+            ft.DataColumn(ft.Text("Hora")),
+            ft.DataColumn(ft.Text("Servicio")),
+            ft.DataColumn(ft.Text("Monto")),
+            ft.DataColumn(ft.Text("Estado")),
+            ft.DataColumn(ft.Text("Acciones"))
+        ],
+        rows=[]
+    )
+
+    # Cargar citas desde la base de datos
+    def load_appointments():
+        appointment_table.rows.clear()
+        appointments = database1.get_all_appointments()
+        for row in appointments:
+            # Obtener el monto del servicio
+            service_price = database1.get_service_price(row[5])  # Asumiendo que `get_service_price` es una función que retorna el precio del servicio
+            appointment_table.rows.append(
+                ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(row[1])),  # Nombre
+                    ft.DataCell(ft.Text(row[2])),  # Teléfono
+                    ft.DataCell(ft.Text(row[3])),  # Fecha
+                    ft.DataCell(ft.Text(row[4])),  # Hora
+                    ft.DataCell(ft.Text(row[5])),  # Servicio
+                    ft.DataCell(ft.Text(service_price or "N/A")),  # Monto, manejar si es None
+                    ft.DataCell(ft.Text(row[6])),  # Estado
+                    ft.DataCell(
+                        ft.Row([
+                            ft.IconButton(ft.icons.EDIT, on_click=lambda e, row=row: edit_appointment(row)),
+                            ft.IconButton(ft.icons.DELETE, on_click=lambda e, row=row: delete_appointment(row[0]))
+                        ])
+                    )
+                ])
+            )
+        page.update()
+
+    def edit_appointment(row):
+        global editing_appointment_id  # Referencia a la variable global
+
+        # Cargar los valores actuales en los campos de entrada para edición
+        name_input.value = row[1]  # Nombre
+        phone_input.value = row[2]  # Teléfono
+        phone_input.read_only = True  # Hacer el campo de teléfono solo lectura
+        date_input.value = row[3]  # Fecha
+        time_input.value = row[4]  # Hora
+        service_input.value = row[5]  # Servicio
+        status_input.value = row[6]  # Estado
+
+        # Guardar el ID de la cita que se está editando
+        editing_appointment_id = row[0]
+        page.update()
+
+    # Función para agregar o actualizar una cita
+    def add_or_update_appointment(e):
+        global editing_appointment_id
+        name = name_input.value.strip()
+        phone = phone_input.value.strip()
+        date = date_input.value.strip()
+        time = time_input.value.strip()
+        service = service_input.value
+        status = status_input.value
+
+        # Verificar campos vacíos
+        if not name or not phone or not date or not time or not service or not status:
+            # Crear el diálogo de alerta
+            dialog = ft.AlertDialog(
+                title=ft.Text("Error"),
+                content=ft.Text("Por favor, llena todos los campos antes de agendar."),
+                actions=[ft.TextButton("Cerrar", on_click=lambda e: close_dialog(dialog))]
+            )
+            # Agregar el diálogo a Page.overlay y abrirlo
+            page.overlay.append(dialog)
+            dialog.open = True
+            page.update()
+            return
+        
+        # Verificar y/o insertar cliente
+        customer = database1.find_customer(name, phone)
+        if customer is None:
+            database1.insert_or_update_customer(name, phone)
+            customer_id = database1.find_customer(name, phone)[0]  # Obtener el ID del nuevo cliente
+        else:
+            customer_id = customer[0]
+
+        # Verificar el ID del servicio
+        service_id = None
+        for service_entry in database1.get_all_services():
+            if service_entry[1] == service:
+                service_id = service_entry[0]  # Obtener el ID del servicio
+                break
+
+        # Inserción o actualización de la cita
+        try:
+            if editing_appointment_id:
+                database1.update_appointment(editing_appointment_id, customer_id, date, time, service_id, status)
+                editing_appointment_id = None  # Resetear el ID de edición
+            else:
+                database1.insert_appointment(customer_id, date, time, service_id, status)
+
+            load_appointments()  # Recargar citas después de agregar/actualizar
+
+            # Limpiar campos de entrada
+            name_input.value = ""
+            phone_input.value = ""
+            date_input.value = ""
+            time_input.value = ""
+            service_input.value = None
+            status_input.value = "Pendiente"
+            page.update()
+
+        except Exception as ex:
+            print(f"Error al insertar/actualizar la cita: {ex}")  # Mensaje de error
+
+    def close_dialog(dialog):
+        dialog.open = False
+        page.update()
+
+    # Función para eliminar una cita
+    def delete_appointment(appointment_id):
+        database1.delete_appointment(appointment_id)
+        load_appointments()
+
+    # Cargar las citas existentes al iniciar
+    load_appointments()
+
+    # Botón para agendar cita
+    schedule_button = ft.ElevatedButton(text="Agendar Cita", on_click=add_or_update_appointment)
+
+    # Botón para limpiar citas manualmente
+    clear_button = ft.ElevatedButton(text="Limpiar Citas", on_click=lambda e: clear_appointments())
+
+    # Agregar controles a la vista de citas
+    main_content.controls.clear()
+    main_content.controls.append(
+        ft.Column([
+            ft.Text("Agenda de Citas - Manicura y Pedicura", theme_style="headlineMedium", text_align=ft.TextAlign.CENTER),
+            name_input,
+            phone_input,
+            date_input,
+            time_input,
+            service_input,
+            status_input,
+            schedule_button,
+            clear_button,  # Agregar botón de limpiar
+            appointment_table,
+            ft.ElevatedButton(text="Volver", on_click=lambda e: load_main_view(main_content, page))  # Botón para volver
+        ])
+    )
+    page.update()
+
+    # Función para limpiar citas sin afectar el historial de servicios
+    def clear_appointments():
+        today = datetime.now().strftime('%d/%m/%Y')
+        database1.clear_appointments(today)  # Asumiendo que tienes una función para limpiar citas
+        load_appointments()  # Recargar citas después de limpiar
+
+    # Programar la limpieza de citas al final del día
+    def schedule_midnight_cleanup():
+        today_date = datetime.now().date()
+        tomorrow_date = today_date + timedelta(days=1)
+        midnight_time = datetime.combine(tomorrow_date, datetime.min.time())
+        wait_time = (midnight_time - datetime.now()).total_seconds()
+        Timer(wait_time, clear_appointments).start()  # Programar limpieza para medianoche
+
+    # Llama a la función para iniciar la programación
+    schedule_midnight_cleanup()
